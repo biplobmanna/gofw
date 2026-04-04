@@ -1,0 +1,42 @@
+package main
+
+import (
+	"sync"
+	"time"
+)
+
+const DEBOUNCE_TIMER_MILLISECONDS = 500 * time.Millisecond
+var (
+	timerMu sync.Mutex
+	triggerCounter int
+	timer *time.Timer
+)
+
+func scheduleCmdRunner(meta watchMeta) {
+	// log.Println("scheduleCmdRunner > ")
+
+	// lock the mutex
+	timerMu.Lock()
+	defer timerMu.Unlock() // unlock on function close
+
+	// close the previous timer
+	if timer != nil {
+		timer.Stop()
+		timer = nil
+	}
+
+	// update the counter
+	triggerCounter++
+	timerCounter := triggerCounter
+
+	// call the afterFunc
+	timer = time.AfterFunc(DEBOUNCE_TIMER_MILLISECONDS, func(){
+		timerMu.Lock()
+		defer timerMu.Unlock()
+
+		// only latest function will run
+		if timerCounter == triggerCounter {
+			cmdRunner(meta)
+		}
+	})
+}

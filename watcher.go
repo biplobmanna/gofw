@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -11,12 +10,18 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-func watcher(path string) {
+
+type watchMeta struct {
+	path string
+	cmd string
+}
+
+func watcher(meta watchMeta) {
 	// path to watch; if no path is provided
 	// use the current working directory
-	if path == "" {
+	if meta.path == "" {
 		var err error
-		path, err = os.Getwd()
+		meta.path, err = os.Getwd()
 		if err != nil {
 			log.Fatal("Failed to fetch the current working directory!")
 		}
@@ -31,47 +36,58 @@ func watcher(path string) {
 	defer watcher.Close()
 
 	// go routine to watch
-	go func() {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) {
-					log.Printf("%v: %v", event.Op.String(), event.Name) // replaced with running the cmd
-				} else if event.Has(fsnotify.Create) {
-					log.Printf("%v: %v", event.Op.String(), event.Name) // replaced with running the cmd
-					info, err := os.Stat(event.Name)
-					if err != nil {
-						log.Fatal(err)
-					} else if info.IsDir() {
-						watchRecursive(event.Name, watcher)
-					}
+	go watching(meta, watcher)
 
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Fatal(err)
-			}
-		}
-	}()
+	// run the command for the first time
+	cmdRunner(meta)
 
-	// build the watcher
-	err = watchRecursive(path, watcher)
+	// use the created watcher for the first time
+	err = watchRecursive(meta.path, watcher)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("watching for changes in: %v", path)
+	log.Printf("watching for changes in: %s\n", meta.path)
 
 	// block the main gorouting forever
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	fmt.Println("shutting down gracefully...")
 
+	// exit on terminate signal, and when child is closed
+	select {
+	case <-sig:
+		log.Println("shutting down gracefully...")
+	case <-shutdownCh:
+		log.Println("child terminated, shutting down gracefully...")
+	}
+}
+
+func watching(meta watchMeta, watcher *fsnotify.Watcher) {
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) {
+				// schedule the command runner
+				scheduleCmdRunner(meta)
+			} else if event.Has(fsnotify.Create) {
+				info, err := os.Stat(event.Name)
+				if err != nil {
+					log.Fatal(err)
+				} else if info.IsDir() {
+					watchRecursive(event.Name, watcher)
+				}
+				// schedule the command runner
+				scheduleCmdRunner(meta)
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Fatal(err)
+		}
+	}
 }
 
 func watchRecursive(path string, watcher *fsnotify.Watcher) error {
