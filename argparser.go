@@ -12,6 +12,6 @@ func argparse() watchMeta {
 
 	return watchMeta{
 		path: *pathFlag,
-		cmd: *execFlag,
+		cmd:  *execFlag,
 	}
 }

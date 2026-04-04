@@ -1,9 +1,9 @@
 package main
 
 import (
+	"os"
 	"os/signal"
 	"syscall"
-	"os"
 
 	"golang.org/x/sys/unix"
 )

@@ -8,12 +8,12 @@ import (
 	"syscall"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/term"
 )
-
 
 type watchMeta struct {
 	path string
-	cmd string
+	cmd  string
 }
 
 func watcher(meta watchMeta) {
@@ -52,13 +52,21 @@ func watcher(meta watchMeta) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
-	// exit on terminate signal, and when child is closed
-	select {
-	case <-sig:
-		log.Println("shutting down gracefully...")
-	case <-shutdownCh:
-		log.Println("child terminated, shutting down gracefully...")
+	// exit on SIGTERM
+	<-sig
+	mu.Lock()
+	if runningCmd != nil && runningCmd.Process != nil {
+		syscall.Kill(-runningCmd.Process.Pid, syscall.SIGKILL)
+		runningCmd.Wait()
+		if runningPtmx != nil {
+			runningPtmx.Close()
+		}
+		if runningOldState != nil {
+			term.Restore(int(os.Stdin.Fd()), runningOldState)
+		}
 	}
+	mu.Unlock()
+	log.Println("shutting down gracefully...")
 }
 
 func watching(meta watchMeta, watcher *fsnotify.Watcher) {

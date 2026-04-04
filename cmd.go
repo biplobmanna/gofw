@@ -1,102 +1,137 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"syscall"
 
-	"golang.org/x/sys/unix"
+	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 var mu sync.Mutex
-var currentRunning *exec.Cmd
+var runningCmd *exec.Cmd
+var runningPtmx *os.File
+var runningOldState *term.State
 
-// shutdown when the child is closed
-var shutdownCh = make(chan struct{})
-var shutdownOnce sync.Once
+var winch chan os.Signal
 
+func winchTriggerSetup() {
+	winch = make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+}
 
 func cmdRunner(meta watchMeta) {
 	// mutex lock
 	mu.Lock()
 	defer mu.Unlock() // defer close on function end
 
+	// check if runningCmd, runningPtmx and close accordingly
+	if runningCmd != nil && runningCmd.Process != nil {
+		// kill the shell
+		syscall.Kill(-runningCmd.Process.Pid, syscall.SIGKILL)
+		runningCmd.Wait()
+
+		// close ptmx if running
+		if runningPtmx != nil {
+			runningPtmx.Close()
+		}
+
+		// restore the term oldState
+		if runningOldState != nil {
+			term.Restore(int(os.Stdin.Fd()), runningOldState)
+		}
+
+		// make pointers nil
+		runningCmd = nil
+		runningPtmx = nil
+		runningOldState = nil
+	}
+
 	// print hint of function running
 	log.Println("run:", meta.path, meta.cmd)
 
+	// Run Command
+	runningCmd = exec.Command("sh", "-c", meta.cmd)
+	runningCmd.Dir = meta.path
 
-	// check if any currently running command
-	if currentRunning != nil && currentRunning.Process != nil {
-		// restore terminal control to gofw before killing the child
-		unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, syscall.Getpgrp())
-
-		syscall.Kill(-currentRunning.Process.Pid, syscall.SIGKILL)
-		currentRunning.Wait()
-		currentRunning = nil
-	}
-
-	// create a commnd, and run it
-	currentRunning = exec.Command("sh", "-c", meta.cmd)
-	currentRunning.Dir = meta.path
-	currentRunning.Stdin = os.Stdin
-	currentRunning.Stdout = os.Stdout
-	currentRunning.Stderr = os.Stderr
-
-	// creating pipes for stdout, stderr
-	// since by default, any new process group is started in the BG
-	// the TTY will suspend the process if it tries to write to the TTY
-	// stdout, _ := currentRunning.StdoutPipe()
-	// stderr, _ := currentRunning.StderrPipe()
-
-	// make shell the leader of the new process group
-	currentRunning.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// start the command
-	if err := currentRunning.Start(); err != nil {
-		log.Printf("Failed to start command: %s\n", meta.cmd)
-		os.Exit(1)
-	}
-
-	// give the child's process group terminal control so it can read from stdin
-	// Process is only populated after Start()
-	unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, currentRunning.Process.Pid)
-
-	// proxy the stdout, stderr to current terminal
-	// go io.Copy(os.Stdout, stdout)
-	// go io.Copy(os.Stderr, stderr)
-
-	// wait for the command to complete, in the backgroud
-	cmd := currentRunning // capture for local run
-	go func(){
-		err := cmd.Wait()
-
-		// if the child exited natuarally, i.e., was not restarted when another event ran
-		mu.Lock()
-		exitedNaturally := currentRunning == cmd
+	// create a new pty, with the cmd to run
+	var err error
+	runningPtmx, err = pty.Start(runningCmd)
+	if err != nil {
 		mu.Unlock()
+		log.Fatal("Couldn't start PTY")
+	}
 
-		if exitedNaturally {
-			// when the child exits naturally, restore terminal control to gofw
-			unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, syscall.Getpgrp())
-
-			// only kill parent, if child was killed by a signal (CTRL+C, kill, etc...)
-			// The logic:
-			//  - err == nil (child exited with code 0) → keep watching
-			//  - err != nil but Signaled() == false (child crashed with non-zero exit) → keep watching
-			//  - Signaled() == true (child received SIGINT, SIGKILL, SIGTERM, etc.) → close parent
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-					// handle shell induced exit, i.e., exitCode = 128 + N
-					// where N is the signal code
-					if status.Signaled()  || status.ExitStatus() >= 128 {
-						shutdownOnce.Do(func(){
-							close(shutdownCh)
-						})
+	// setup window change handler goroutine
+	// only setup once
+	if winch == nil {
+		winchTriggerSetup()
+		go func() {
+			for range winch {
+				// only if there's a PTMX running
+				mu.Lock()
+				ptmx := runningPtmx
+				mu.Unlock()
+				if ptmx != nil {
+					if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
+						log.Printf("Failed to resize PTY: %s", err)
 					}
 				}
 			}
+		}()
+	}
+	// trigger the WINCH signal, but non blocking
+	select {
+	case winch <- syscall.SIGWINCH:
+	default:
+	}
+
+	// set stdin in raw mode
+	runningOldState, err = term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		mu.Unlock()
+		log.Fatalf("Failed to set PTY in raw mode: %s", err)
+	}
+
+	// copy stdin to pty, and pty to stdout
+	go io.Copy(runningPtmx, os.Stdin)
+	go io.Copy(os.Stdout, runningPtmx)
+
+	// wait to close
+	go func(cmd *exec.Cmd) {
+		// exit the command; mostly exits for restarts
+		cmd.Wait()
+
+		// checks if actual exit is necessary
+		mu.Lock()
+		exitedNaturally := cmd == runningCmd
+		mu.Unlock()
+
+		if exitedNaturally {
+			// close the runningPtmx
+			mu.Lock()
+			ptmx := runningPtmx
+			state := runningOldState
+			runningCmd = nil
+			runningPtmx = nil
+			runningOldState = nil
+			mu.Unlock()
+
+			// restore terminal state, close ptmx
+			if ptmx != nil {
+				ptmx.Close()
+			}
+			if state != nil {
+				term.Restore(int(os.Stdin.Fd()), state)
+			}
+
+			// log message
+			log.Printf("Child terminated gracefully...\nPress CTRL+C to terminate parent...\n")
 		}
-	}()
+	}(runningCmd)
 }
