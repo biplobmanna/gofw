@@ -17,6 +17,9 @@ type watchMeta struct {
 	path string
 	// cmd is the shell command re-run on every detected change.
 	cmd string
+	// config is the path to an optional YAML config file. When set, path and
+	// cmd are populated from the file rather than from CLI flags directly.
+	config string
 }
 
 // watcher is the main run loop. It defaults path to the current working

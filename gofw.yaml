@@ -1,0 +1,2 @@
+path: ../gossh-play/
+command: go run .

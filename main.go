@@ -5,12 +5,16 @@
 //
 // Usage:
 //
-//	gofw [-p <path>] -c <command>
+//	gofw [-p <path>] [-x <command>] [-c <config>]
 //
 // Flags:
 //
 //	-p  Root path to watch (default: current working directory).
-//	-c  Shell command to re-run on changes. Executed via "sh -c".
+//	-x  Shell command to re-run on changes. Executed via "sh -c".
+//	-c  Path to a YAML config file providing path and/or command.
+//
+// CLI flags take precedence: values from -p and -x override any corresponding
+// fields in the config file only when the config field is empty.
 //
 // gofw runs the command immediately on startup, then re-runs it (debounced by
 // 500 ms) whenever a Write, Remove, or Create event is detected anywhere under
@@ -40,6 +44,8 @@ func main() {
 
 	// get the metadata from the commandline
 	meta := argparse()
+	// if config file is passed, then use that config file to update the meta
+	parseYamlFile(&meta)
 
 	// call the watcher
 	watcher(meta)
