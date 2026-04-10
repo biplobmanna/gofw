@@ -1,3 +1,25 @@
+// gofw watches a directory tree for filesystem changes and re-runs a shell
+// command whenever a change is detected. It is designed for development
+// workflows where a build or test command should re-execute automatically on
+// every save.
+//
+// Usage:
+//
+//	gofw [-p <path>] -c <command>
+//
+// Flags:
+//
+//	-p  Root path to watch (default: current working directory).
+//	-c  Shell command to re-run on changes. Executed via "sh -c".
+//
+// gofw runs the command immediately on startup, then re-runs it (debounced by
+// 500 ms) whenever a Write, Remove, or Create event is detected anywhere under
+// the watched tree. New subdirectories are watched automatically as they appear.
+// The command runs inside a PTY so programs that require an interactive terminal
+// (colour output, progress bars, etc.) behave correctly.
+//
+// Terminate gofw with SIGINT or SIGTERM (Ctrl-C). The currently running child
+// process is killed and the terminal is restored before exit.
 package main
 
 import (
@@ -6,6 +28,10 @@ import (
 	"syscall"
 )
 
+// main is the program entry point. It suppresses SIGTTOU (which would otherwise
+// pause the process when it tries to write to the terminal from the background),
+// restores the terminal to a sane cooked state in case a previous invocation
+// crashed mid-run, parses CLI flags, and starts the watcher loop.
 func main() {
 	// ignore all SIGTTOU
 	signal.Ignore(syscall.SIGTTOU)

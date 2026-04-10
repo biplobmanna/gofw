@@ -13,18 +13,41 @@ import (
 	"golang.org/x/term"
 )
 
+// mu guards the three running-process globals below. It must not be held by
+// any caller of cmdRunner, because cmdRunner acquires mu itself at the top.
 var mu sync.Mutex
+
+// runningCmd is the currently executing child process, or nil if none is running.
 var runningCmd *exec.Cmd
+
+// runningPtmx is the PTY master file attached to runningCmd, or nil.
 var runningPtmx *os.File
+
+// runningOldState is the saved terminal state from before stdin was put into
+// raw mode for the current child. It is restored when the child exits or is killed.
 var runningOldState *term.State
 
+// winch is the channel that receives SIGWINCH signals so the PTY can be
+// resized to match the terminal window. It is initialised once, lazily, the
+// first time cmdRunner is called.
 var winch chan os.Signal
 
+// winchTriggerSetup registers the process to receive SIGWINCH on the winch
+// channel. It must be called exactly once before the SIGWINCH forwarding
+// goroutine is started.
 func winchTriggerSetup() {
 	winch = make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 }
 
+// cmdRunner kills any currently running child process, then starts meta.cmd
+// via "sh -c" inside a PTY so that programs requiring an interactive terminal
+// work correctly. It sets stdin to raw mode for the duration of the child's
+// life, pipes stdin/stdout through the PTY, and spawns a goroutine that
+// restores the terminal when the child exits naturally.
+//
+// cmdRunner acquires mu at the top and must never be called while mu is
+// already held by the same goroutine.
 func cmdRunner(meta watchMeta) {
 	// mutex lock
 	mu.Lock()

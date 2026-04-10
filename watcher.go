@@ -11,11 +11,19 @@ import (
 	"golang.org/x/term"
 )
 
+// watchMeta carries the configuration supplied by the user via CLI flags.
 type watchMeta struct {
+	// path is the root directory to watch recursively.
 	path string
-	cmd  string
+	// cmd is the shell command re-run on every detected change.
+	cmd string
 }
 
+// watcher is the main run loop. It defaults path to the current working
+// directory when none is provided, registers the entire directory tree with
+// fsnotify, runs the command once on startup, and then blocks until SIGINT or
+// SIGTERM is received. On shutdown it kills the active child process and
+// restores the terminal state.
 func watcher(meta watchMeta) {
 	// path to watch; if no path is provided
 	// use the current working directory
@@ -69,6 +77,11 @@ func watcher(meta watchMeta) {
 	log.Println("shutting down gracefully...")
 }
 
+// watching is the event loop that consumes fsnotify events in a goroutine.
+// Write and Remove events trigger a debounced command re-run immediately.
+// Create events additionally register any new subdirectory with the watcher
+// before scheduling a re-run, ensuring the watch tree stays up-to-date as
+// directories are added.
 func watching(meta watchMeta, watcher *fsnotify.Watcher) {
 	for {
 		select {
@@ -98,6 +111,9 @@ func watching(meta watchMeta, watcher *fsnotify.Watcher) {
 	}
 }
 
+// watchRecursive walks the directory tree rooted at path and registers every
+// subdirectory with watcher. Files are ignored because fsnotify watches at the
+// directory level and reports events for all files within a watched directory.
 func watchRecursive(path string, watcher *fsnotify.Watcher) error {
 	return filepath.Walk(path, func(newPath string, info os.FileInfo, err error) error {
 		if err != nil {
