@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const DEBOUNCE_TIMER_MILLISECONDS = 500 * time.Millisecond
+const debounceTimer = 500 * time.Millisecond
 
 var (
 	timerMu        sync.Mutex
@@ -31,7 +31,7 @@ func scheduleCmdRunner(meta watchMeta) {
 	timerCounter := triggerCounter
 
 	// call the afterFunc
-	timer = time.AfterFunc(DEBOUNCE_TIMER_MILLISECONDS, func() {
+	timer = time.AfterFunc(debounceTimer, func() {
 		timerMu.Lock()
 		defer timerMu.Unlock()
 
